@@ -1,0 +1,8 @@
+apply plugin: 'application'
+
+mainClassName = 'com.github.sedovalx.deps.analyzer.examples.MainKt'
+
+dependencies {
+    compile project(':sources:client')
+    runtime 'org.apache.logging.log4j:log4j-slf4j-impl:2.11.1'
+}
