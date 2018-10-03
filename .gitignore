@@ -1,5 +1,4 @@
 .idea
 .gradle
-src/bin
-src/build
-build
+**/out
+**/build
