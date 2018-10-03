@@ -8,7 +8,7 @@
     </Appenders>
 
     <Loggers>
-        <Logger name="com.github.sedovalx.deps.analyzer" level="TRACE"/>
+        <Logger name="com.github.sedovalx.deps.analyzer" level="INFO"/>
         <Root level="WARN">
             <AppenderRef ref="STDOUT"/>
         </Root>

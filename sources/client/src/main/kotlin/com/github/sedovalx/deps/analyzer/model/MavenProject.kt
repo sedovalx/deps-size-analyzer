@@ -1,8 +1,13 @@
 package com.github.sedovalx.deps.analyzer.model
 
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.JsonProcessingException
+import com.fasterxml.jackson.core.JsonToken
+import com.fasterxml.jackson.databind.DeserializationContext
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.MapperFeature
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.deser.DeserializationProblemHandler
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.dataformat.xml.annotation.JacksonXmlRootElement
 import com.fasterxml.jackson.module.kotlin.KotlinModule
@@ -11,7 +16,8 @@ import mu.KLogging
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
-import java.lang.IllegalArgumentException
+import java.io.StringWriter
+import java.io.Writer
 import java.lang.RuntimeException
 
 enum class DependencyScope {
@@ -63,8 +69,8 @@ data class MavenProject(
     val artifactId: String,
     val version: String?,
     val parent: MavenDependency?,
-    val properties: Map<String, String> = emptyMap(),
-    val dependencies: Iterable<MavenDependency> = emptyList(),
+    val properties: Map<String, String>?,
+    val dependencies: Iterable<MavenDependency>?,
     val dependencyManagement: DependencyManagement?
 ) {
     val inheritedGroup: String? get() = groupId ?: parent?.groupId
@@ -76,8 +82,39 @@ data class MavenProject(
 open class DependencyResolutionException(message: String, cause: Exception? = null) : RuntimeException(message, cause)
 class DependencyNotFoundException(dependencyId: String) : DependencyResolutionException("Dependency $dependencyId is not found")
 class DependencyDownloadException(dependencyId: String, cause: Exception) : DependencyResolutionException("Failed to download $dependencyId", cause)
-class UnresolvedDependencyException(projectId: String, dependencyId: String) : DependencyResolutionException("Dependency management of $projectId doesn't contain version of $dependencyId")
 class NoVersionDependencyException(projectId: String, dependencyId: String) : DependencyResolutionException("Dependency management of $projectId has no version of $dependencyId")
+class IllegalDependencyFormatException(dependency: String) : DependencyResolutionException("Format of $dependency is invalid. Please use the Gradle notation.")
+class DependencyPomParsingException(dependencyId: String, cause: JsonProcessingException) : DependencyResolutionException("Can't parse $dependencyId POM", cause)
+class DependencyPomEmptyException(dependencyId: String) : DependencyResolutionException("Downloaded $dependencyId POM is empty")
+
+data class DependencyAnalyzeResult(
+    val dependency: MavenDependency,
+    val pomUrl: String,
+    val children: Set<DependencyAnalyzeResult>,
+    val size: Long
+) {
+    val totalSize: Long by lazy {
+        children.fold(size) { sum, item -> sum + item.totalSize }
+    }
+
+    fun print(writer: Writer, printTotals: Boolean = false, tabulation: String = "") {
+        writer.write(tabulation + dependency.gradleId + " ($size)\n")
+        children.forEach {
+            it.print(writer, false, "$tabulation  ")
+        }
+
+        if (printTotals) {
+            writer.write(tabulation + "Total size: ${totalSize / 1024} Kb ($totalSize)")
+        }
+    }
+
+    override fun toString(): String {
+        return StringWriter().use {
+            print(it, true)
+            it.toString()
+        }
+    }
+}
 
 class DepsClient(
     private val repositories: Set<String> = LinkedHashSet<String>(1).apply { add("https://repo1.maven.org/maven2") },
@@ -86,37 +123,93 @@ class DepsClient(
 ) {
     companion object : KLogging() {
         private val DEPENDENCY_REGEX = "([^:]+):([^:]+):([^:]+)".toRegex()
+        private val IGNORED_SCOPES = setOf(
+            DependencyScope.TEST,
+            DependencyScope.PROVIDED,
+            DependencyScope.SYSTEM
+        )
 
-
-        private fun createDefaultXmlMapper() = XmlMapper()
+        fun createDefaultXmlMapper() = XmlMapper()
             .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
             .registerModule(KotlinModule())
+            .addHandler(object : DeserializationProblemHandler() {
+                override fun handleUnexpectedToken(
+                    ctxt: DeserializationContext,
+                    targetType: Class<*>,
+                    t: JsonToken,
+                    p: JsonParser,
+                    failureMsg: String?
+                ): Any {
+                    return if (p.parsingContext.currentName == MavenProject::dependencies.name && t == JsonToken.VALUE_STRING) {
+                        ArrayList<MavenDependency>(0)
+                    } else {
+                        super.handleUnexpectedToken(ctxt, targetType, t, p, failureMsg)
+                    }
+                }
+            })
     }
 
-    fun flattenParents(project: MavenProject): MavenProject {
-        return if (project.parent == null) {
-            project
+    fun analyze(dependency: String): DependencyAnalyzeResult {
+        val (pomUrl, project) = downloadPom(dependency)
+        val dependencies = project.flattenParents().resolveDependencyVersions().dependencies?.toList() ?: emptyList()
+
+        return DependencyAnalyzeResult(
+            MavenDependency(project.inheritedGroup!!, project.artifactId, project.inheritedVersion!!, null),
+            pomUrl,
+            dependencies.filter { it.scope !in IGNORED_SCOPES }.map { analyze(it.gradleId) }.toSet(),
+            getDependencySize(pomUrl.removeSuffix("pom") + "jar") ?: 0
+        )
+    }
+
+    private fun MavenProject.flattenParents(): MavenProject {
+        return if (parent == null) {
+            this
         } else {
-            logger.trace { "Downloading the parent of ${project.gradleId}" }
+            logger.trace { "Downloading the parent of $gradleId" }
             val (_, projectParent) = try {
-                downloadPom(project.parent.gradleId)
+                downloadPom(parent.gradleId)
             } catch (ex: Exception) {
-                logger.trace { "Failed to download the parent of ${project.gradleId}: ${ex.message}" }
-                throw DependencyDownloadException(project.parent.gradleId, ex)
+                logger.trace { "Failed to download the parent of $gradleId: ${ex.message}" }
+                throw DependencyDownloadException(parent.gradleId, ex)
             }
 
-            val flattenedParent = flattenParents(projectParent)
+            val flattenedParent = projectParent.flattenParents()
             MavenProject(
-                project.groupId ?: flattenedParent.groupId,
-                project.artifactId,
-                project.version ?: flattenedParent.version,
+                groupId ?: flattenedParent.groupId,
+                artifactId,
+                version ?: flattenedParent.version,
                 null,
-                flattenedParent.properties.plus(project.properties),
-                project.dependencies + flattenedParent.dependencies,
-                project.dependencyManagement + flattenedParent.dependencyManagement
+                flattenedParent.properties.plus(properties) { p1, p2 -> p1 + p2 },
+                dependencies.plus(flattenedParent.dependencies) { l1, l2 -> l1 + l2 },
+                dependencyManagement + flattenedParent.dependencyManagement
             )
         }
+    }
+
+    private fun interpolateDependency(project: MavenProject, dependency: MavenDependency, properties: Map<String, String>?): MavenDependency {
+        val placeholder = dependency.versionPlaceholder
+        return when {
+            dependency.version == null -> {
+                logger.trace { "Can't find a version info of $dependency dependency" }
+                throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
+            }
+            placeholder == "project.version" -> dependency.copy(version = project.inheritedVersion)
+            placeholder != null -> {
+                val version = properties?.get(placeholder)
+                if (version != null) {
+                    dependency.copy(version = version)
+                } else {
+                    logger.trace { "Can't find a version info of $dependency dependency" }
+                    throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
+                }
+            }
+            else -> dependency
+        }
+    }
+
+    private fun interpolateVersions(project: MavenProject, dependencies: Iterable<MavenDependency>, properties: Map<String, String>?): List<MavenDependency> {
+        return dependencies.map { interpolateDependency(project, it, properties) }
     }
 
     private fun resolveDependencyManagement(project: MavenProject): DependencyManagement {
@@ -124,41 +217,35 @@ class DepsClient(
             return DependencyManagement(emptyList())
         }
 
-        val resolved = project.dependencyManagement.dependencies.map { dependency ->
-            val placeholder = dependency.versionPlaceholder
-            when {
-                dependency.version == null -> {
-                    logger.trace { "Can't find a version info of $dependency dependency" }
-                    throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
-                }
-                placeholder != null -> {
-                    val version = project.properties[placeholder]
-                    if (version != null) {
-                        dependency.copy(version = version)
-                    } else {
-                        logger.trace { "Can't find a version info of $dependency dependency" }
-                        throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
-                    }
-                }
-                else -> dependency
-            }
-        }
-
+        val resolved = interpolateVersions(
+            project,
+            project.dependencyManagement.dependencies,
+            project.properties
+        )
         return DependencyManagement(resolved)
     }
 
-    fun resolveDependencyVersions(project: MavenProject): MavenProject {
-        val (unresolved, resolved) = project.dependencies.partition { it.version == null || it.versionPlaceholder != null }
+    private fun MavenProject.resolveDependencyVersions(): MavenProject {
+        if (dependencies == null || !dependencies.any()) {
+            return this.copy(dependencyManagement = null)
+        }
+
+        val (unresolved, resolved) = dependencies.partition { it.version == null || it.versionPlaceholder != null }
         return if (unresolved.isEmpty()) {
-            project.copy(dependencyManagement = null)
+            this.copy(dependencyManagement = null)
         } else {
-            val dependencyManagement = resolveDependencyManagement(project)
+            val dependencyManagement = resolveDependencyManagement(this)
             val dependencyMap = dependencyManagement.dependencies.associateBy { it.artifactName }
             val found = unresolved.map {
-                dependencyMap[it.artifactName] ?: throw UnresolvedDependencyException(project.gradleId, it.toString())
+                val managed = dependencyMap[it.artifactName]
+                if (managed != null) {
+                    it.copy(version = managed.version)
+                } else {
+                    interpolateDependency(this, it, this.properties)
+                }
             }
 
-            project.copy(dependencies = resolved + found, dependencyManagement = null)
+            copy(dependencies = resolved + found, dependencyManagement = null)
         }
     }
 
@@ -226,7 +313,12 @@ class DepsClient(
 
         httpClient.newCall(request).execute().use {
             val size = it.header("Content-Length")?.toLongOrNull()
-            logger.trace { "Got size of $dependencyUrl: $size bytes" }
+            if (size != null) {
+                logger.trace { "Got size of $dependencyUrl: $size bytes" }
+            } else {
+                logger.warn { "The size of $dependencyUrl is undefined" }
+            }
+
             return size
         }
     }
@@ -245,15 +337,21 @@ class DepsClient(
             }
 
             if (response.isSuccessful) {
-                val project = response.use {
-                    it.body()?.byteStream()?.let { stream -> mapper.readValue<MavenProject>(stream) }
+                val responseBody = response.body()?.string()
+                val project = if (responseBody != null) {
+                    try {
+                        mapper.readValue<MavenProject>(responseBody)
+                    } catch (ex: JsonProcessingException) {
+                        logger.debug { "Can't deserialize response body with error: ${ex.message}\n$responseBody" }
+                        throw DependencyPomParsingException(dependency, ex)
+                    }
+                } else {
+                    logger.trace { "Dependency $dependency POM is empty" }
+                    throw DependencyPomEmptyException(dependency)
                 }
 
-                if (project != null) {
-                    return dependencyUrl to project
-                } else {
-                    logger.trace { "Response on $dependencyUrl has an empty body" }
-                }
+
+                return dependencyUrl to project
             } else {
                 logger.trace { "Request to $dependencyUrl resolved as ${response.code()}: ${response.message()}" }
             }
@@ -266,7 +364,7 @@ class DepsClient(
         val dependencyPath = DEPENDENCY_REGEX.matchEntire(dependency)?.let { matchResult ->
             val (group, artifact, version) = matchResult.destructured
             "/${group.replace(".", "/")}/$artifact/$version/$artifact-$version.pom"
-        } ?: throw IllegalArgumentException("$dependency string doesn't comply the pattern $DEPENDENCY_REGEX")
+        } ?: throw IllegalDependencyFormatException(dependency)
 
         return repositoryUrl.trimEnd('/') + dependencyPath
     }
@@ -275,6 +373,14 @@ class DepsClient(
         return when {
             this == null && other == null -> null
             this != null && other != null -> DependencyManagement(this.dependencies + other.dependencies)
+            else -> this ?: other
+        }
+    }
+
+    private fun <T> T?.plus(other: T?, sum: (T, T) -> T): T? {
+        return when {
+            this == null && other == null -> null
+            this != null && other != null -> sum(this, other)
             else -> this ?: other
         }
     }
