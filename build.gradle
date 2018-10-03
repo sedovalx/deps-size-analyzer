@@ -1,0 +1,25 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.3.0-rc-80'
+}
+
+group 'com.github.sedovalx.deps-size-analyzer'
+version '1.0-SNAPSHOT'
+
+repositories {
+    maven {     url 'http://dl.bintray.com/kotlin/kotlin-eap' }
+    mavenCentral()
+}
+
+dependencies {
+    compile 'org.jetbrains.kotlin:kotlin-stdlib-jdk8'
+    compile 'com.squareup.okhttp3:okhttp:3.11.0'
+    compile 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.9.7'
+    compile 'com.fasterxml.jackson.module:jackson-module-kotlin:2.9.7'
+}
+
+compileKotlin {
+    kotlinOptions.jvmTarget = "1.8"
+}
+compileTestKotlin {
+    kotlinOptions.jvmTarget = "1.8"
+}
