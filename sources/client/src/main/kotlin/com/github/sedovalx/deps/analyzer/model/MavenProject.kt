@@ -30,14 +30,16 @@ data class MavenDependency(
     val scope: DependencyScope?
 ) {
     companion object {
-        private val VERSION_PLACEHOLDER = "\\$\\{([^}])+}".toRegex()
+        private val VERSION_PLACEHOLDER = "\\$\\{([^}]+)}".toRegex()
     }
 
     override fun toString(): String {
-        return dependencyGradleId + if (scope != null) " ($scope)" else ""
+        return gradleId + if (scope != null) " ($scope)" else ""
     }
 
-    val dependencyGradleId: String get() = "$groupId:$artifactId:$version"
+    val gradleId: String get() = "$artifactName:$version"
+
+    val artifactName: String get() = "$groupId:$artifactId"
 
     val versionPlaceholder: String?
         get() {
@@ -68,8 +70,14 @@ data class MavenProject(
     val inheritedGroup: String? get() = groupId ?: parent?.groupId
     val inheritedVersion: String? get() = version ?: parent?.version
 
-    val identity: String get() = "$inheritedGroup:$artifactId:$inheritedVersion"
+    val gradleId: String get() = "$inheritedGroup:$artifactId:$inheritedVersion"
 }
+
+open class DependencyResolutionException(message: String, cause: Exception? = null) : RuntimeException(message, cause)
+class DependencyNotFoundException(dependencyId: String) : DependencyResolutionException("Dependency $dependencyId is not found")
+class DependencyDownloadException(dependencyId: String, cause: Exception) : DependencyResolutionException("Failed to download $dependencyId", cause)
+class UnresolvedDependencyException(projectId: String, dependencyId: String) : DependencyResolutionException("Dependency management of $projectId doesn't contain version of $dependencyId")
+class NoVersionDependencyException(projectId: String, dependencyId: String) : DependencyResolutionException("Dependency management of $projectId has no version of $dependencyId")
 
 class DepsClient(
     private val repositories: Set<String> = LinkedHashSet<String>(1).apply { add("https://repo1.maven.org/maven2") },
@@ -90,11 +98,12 @@ class DepsClient(
         return if (project.parent == null) {
             project
         } else {
+            logger.trace { "Downloading the parent of ${project.gradleId}" }
             val (_, projectParent) = try {
-                downloadPom(project.parent.dependencyGradleId)
+                downloadPom(project.parent.gradleId)
             } catch (ex: Exception) {
-                logger.error(ex) { "Failed to download the parent of ${project.identity}" }
-                throw ex
+                logger.trace { "Failed to download the parent of ${project.gradleId}: ${ex.message}" }
+                throw DependencyDownloadException(project.parent.gradleId, ex)
             }
 
             val flattenedParent = flattenParents(projectParent)
@@ -107,6 +116,49 @@ class DepsClient(
                 project.dependencies + flattenedParent.dependencies,
                 project.dependencyManagement + flattenedParent.dependencyManagement
             )
+        }
+    }
+
+    private fun resolveDependencyManagement(project: MavenProject): DependencyManagement {
+        if (project.dependencyManagement == null) {
+            return DependencyManagement(emptyList())
+        }
+
+        val resolved = project.dependencyManagement.dependencies.map { dependency ->
+            val placeholder = dependency.versionPlaceholder
+            when {
+                dependency.version == null -> {
+                    logger.trace { "Can't find a version info of $dependency dependency" }
+                    throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
+                }
+                placeholder != null -> {
+                    val version = project.properties[placeholder]
+                    if (version != null) {
+                        dependency.copy(version = version)
+                    } else {
+                        logger.trace { "Can't find a version info of $dependency dependency" }
+                        throw NoVersionDependencyException(project.gradleId, dependency.gradleId)
+                    }
+                }
+                else -> dependency
+            }
+        }
+
+        return DependencyManagement(resolved)
+    }
+
+    fun resolveDependencyVersions(project: MavenProject): MavenProject {
+        val (unresolved, resolved) = project.dependencies.partition { it.version == null || it.versionPlaceholder != null }
+        return if (unresolved.isEmpty()) {
+            project.copy(dependencyManagement = null)
+        } else {
+            val dependencyManagement = resolveDependencyManagement(project)
+            val dependencyMap = dependencyManagement.dependencies.associateBy { it.artifactName }
+            val found = unresolved.map {
+                dependencyMap[it.artifactName] ?: throw UnresolvedDependencyException(project.gradleId, it.toString())
+            }
+
+            project.copy(dependencies = resolved + found, dependencyManagement = null)
         }
     }
 
@@ -207,7 +259,7 @@ class DepsClient(
             }
         }
 
-        throw RuntimeException("Dependency $dependency is not found")
+        throw DependencyNotFoundException(dependency)
     }
 
     private fun buildDependencyUrl(repositoryUrl: String, dependency: String): String {
