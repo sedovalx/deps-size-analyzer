@@ -6,13 +6,27 @@ I did not find a gradle plugin for that and decided to write it by myself.
 The client accepts a dependency identifier in the Gradle format and produces a result with 
 with information about the total size of the dependency.
 
+Kotlin:
 ```kotlin
 val client = DepsClient(repositories = setOf("https://repo1.maven.org/maven2"))
 val result: DependencyAnalyzeResult = client.analyze("org.glassfish.jersey.core:jersey-client:2.27")
 println(result)
 ```
 
-For the example above, the output would be
+Java:
+```java
+public class JavaExample {
+    public static void main(String[] args) {
+        LinkedHashSet<String> repositories = new LinkedHashSet<>();
+        repositories.add("https://repo1.maven.org/maven2");
+        DepsClient client = new DepsClient(repositories);
+        DependencyAnalyzeResult result = client.analyze("org.glassfish.jersey.core:jersey-client:2.27");
+        System.out.println(result);
+    }
+}
+```
+
+For both examples above, the output would be
 ```
 org.glassfish.jersey.core:jersey-client:2.27 (181563)
   javax.ws.rs:javax.ws.rs-api:2.1 (127509)

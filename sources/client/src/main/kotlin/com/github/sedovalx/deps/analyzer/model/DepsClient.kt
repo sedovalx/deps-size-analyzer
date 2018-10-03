@@ -16,7 +16,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 
-class DepsClient(
+class DepsClient @JvmOverloads constructor(
     private val repositories: Set<String> = LinkedHashSet<String>(1).apply { add("https://repo1.maven.org/maven2") },
     private val httpClient: OkHttpClient = OkHttpClient(),
     private val mapper: ObjectMapper = createDefaultXmlMapper()
