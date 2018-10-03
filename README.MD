@@ -53,4 +53,5 @@ Total size: 8691 Kb (8900099)
 ## TODO
 - [ ] Support Bintray dependency URL layout
 - [ ] Consider only distinct transitive dependencies
-- [ ] Create a Gradle plugin to run it as a task   
+- [ ] Create a Gradle plugin to run it as a task
+- [ ] Publish to Bintray   
