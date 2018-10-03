@@ -1,6 +1,12 @@
 ## Description
 A java client that can calculate the total size of a Maven/Gradle dependency transitively. 
-I did not find a gradle plugin for that and decided to write it by myself.
+Sometimes I want to know how a new dependency will impact the size of my fat jar, and I want 
+to know it without adding the dependency into the project and building. Unfortunately I did 
+not find a gradle plugin for that and decided to write it by myself. 
+
+The code parses the POM with all its parents to calculate the dependency tree, all provided/system/test 
+dependencies are excluded. Then, it goes through the resolved dependencies and check sizes 
+of corresponding jar files. 
 
 ## Usage
 The client accepts a dependency identifier in the Gradle format and produces a result with 
