@@ -1,6 +1,6 @@
 apply plugin: 'application'
 
-mainClassName = 'com.github.sedovalx.deps.analyzer.examples.MainKt'
+mainClassName = 'com.github.sedovalx.deps.analyzer.examples.KotlinExampleKt'
 
 dependencies {
     compile project(':sources:client')
