@@ -4,4 +4,5 @@ dependencies {
     compile 'com.squareup.okhttp3:okhttp:3.11.0'
     compile 'com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.9.7'
     compile 'com.fasterxml.jackson.module:jackson-module-kotlin:2.9.7'
+    compile 'org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.1.1'
 }

@@ -6,6 +6,7 @@ pluginManagement {
     }
 }
 
-include 'sources:client', 
-        'sources:examples'
+include 'sources:client',
+        'sources:examples',
+        'sources:cli'
 

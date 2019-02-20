@@ -3,7 +3,7 @@ package com.github.sedovalx.deps.analyzer.examples
 import com.github.sedovalx.deps.analyzer.model.DepsClient
 
 
-fun main() {
+suspend fun main() {
     val client = DepsClient()
 
     listOf(
@@ -11,6 +11,8 @@ fun main() {
         "org.glassfish.jersey.core:jersey-client:2.27",
         "com.google.http-client:google-http-client:1.25.0"
     ).forEach {
+        println("================================================================")
         println(client.analyze(it))
+        println()
     }
 }

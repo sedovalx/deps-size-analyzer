@@ -19,12 +19,32 @@ data class MavenDependency(
     val version: String?,
     val scope: DependencyScope?
 ) {
+
     companion object {
         private val VERSION_PLACEHOLDER = "\\$\\{([^}]+)}".toRegex()
+
     }
 
     override fun toString(): String {
         return gradleId + if (scope != null) " ($scope)" else ""
+    }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is MavenDependency) return false
+
+        if (groupId != other.groupId) return false
+        if (artifactId != other.artifactId) return false
+        if (version != other.version) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = groupId.hashCode()
+        result = 31 * result + artifactId.hashCode()
+        result = 31 * result + (version?.hashCode() ?: 0)
+        return result
     }
 
     val gradleId: String get() = "$artifactName:$version"
@@ -43,6 +63,8 @@ data class MavenDependency(
                 null
             }
         }
+
+
 }
 
 data class DependencyManagement(val dependencies: Iterable<MavenDependency> = emptyList())
@@ -70,10 +92,6 @@ data class DependencyAnalyzeResult(
     val children: Set<DependencyAnalyzeResult>,
     val size: Long
 ) {
-    val totalSize: Long by lazy {
-        children.fold(size) { sum, item -> sum + item.totalSize }
-    }
-
     fun print(writer: Writer, printTotals: Boolean = false, tabulation: String = "") {
         writer.write(tabulation + dependency.gradleId + " ($size)\n")
         children.forEach {
@@ -81,8 +99,19 @@ data class DependencyAnalyzeResult(
         }
 
         if (printTotals) {
+            val flattened = flatten()
+            writer.write("\nFlat view:\n")
+            flattened.entries.sortedByDescending { it.value }.forEach { (dep, s) ->
+                writer.write("${dep.gradleId} (${s / 1024} Kb)\n")
+            }
+
+            val totalSize = flattened.values.sum()
             writer.write(tabulation + "Total size: ${totalSize / 1024} Kb ($totalSize)")
         }
+    }
+
+    private fun flatten(): Map<MavenDependency, Long> {
+        return children.fold(mapOf(dependency to size)) { sum, item -> sum + item.flatten() }
     }
 
     override fun toString(): String {

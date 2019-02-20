@@ -1,10 +1,11 @@
 plugins {
-    id 'org.jetbrains.kotlin.jvm' version '1.3.0-rc-80'
+    id 'org.jetbrains.kotlin.jvm' version '1.3.20' apply false
+    id "net.rdrei.android.buildtimetracker" version "0.11.0"
 }
 
 allprojects {
     group 'com.github.sedovalx.deps-size-analyzer'
-    version '1.0-SNAPSHOT'    
+    version '1.0-SNAPSHOT'
 }
 
 subprojects {
@@ -27,6 +28,17 @@ subprojects {
     }
     compileTestKotlin {
         kotlinOptions.jvmTarget = "1.8"
+    }
+}
+
+buildtimetracker {
+    reporters {
+        summary {
+            ordered true
+            threshold 100
+            barstyle "ascii"
+            shortenTaskNames false
+        }
     }
 }
 

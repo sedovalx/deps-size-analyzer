@@ -11,10 +11,14 @@ import com.fasterxml.jackson.databind.deser.DeserializationProblemHandler
 import com.fasterxml.jackson.dataformat.xml.XmlMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.fasterxml.jackson.module.kotlin.readValue
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.future.future
 import mu.KLogging
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 
 class DepsClient @JvmOverloads constructor(
     private val repositories: Set<String> = LinkedHashSet<String>(1).apply { add("https://repo1.maven.org/maven2") },
@@ -50,36 +54,62 @@ class DepsClient @JvmOverloads constructor(
             })
     }
 
-    fun analyze(dependency: String): DependencyAnalyzeResult {
-        val (pomUrl, project) = downloadPom(dependency)
-        val dependencies = project.flattenParents().resolveDependencyVersions().dependencies?.toList() ?: emptyList()
+    suspend fun analyze(dependency: String): DependencyAnalyzeResult {
+        return analyze(dependency, ConcurrentHashMap(), ConcurrentHashMap())
+    }
 
-        return DependencyAnalyzeResult(
+    private suspend fun analyze(
+        dependency: String,
+        dependencyCache: MutableMap<String, Pair<MavenDependency, Long>>,
+        projectCache: MutableMap<String, Pair<String, MavenProject>>
+    ): DependencyAnalyzeResult {
+        val (pomUrl, project) = projectCache.getOrPut(dependency) {
+            downloadPom(dependency)
+        }
+
+        val current = dependencyCache.getOrPut(dependency) {
             MavenDependency(
                 project.inheritedGroup!!,
                 project.artifactId,
                 project.inheritedVersion!!,
                 null
-            ),
+            ) to (getDependencySize(pomUrl.removeSuffix("pom") + "jar") ?: 0)
+        }
+
+        val dependencies = project.flattenParents(projectCache)
+            .resolveDependencyVersions()
+            .dependencies
+            ?.toList()
+            ?.filter { it.gradleId != dependency && it.scope !in IGNORED_SCOPES }
+            ?: emptyList()
+
+        return DependencyAnalyzeResult(
+            current.first,
             pomUrl,
-            dependencies.filter { it.scope !in IGNORED_SCOPES }.map { analyze(it.gradleId) }.toSet(),
-            getDependencySize(pomUrl.removeSuffix("pom") + "jar") ?: 0
+            dependencies.map { analyze(it.gradleId, dependencyCache, projectCache) }.toSet(),
+            current.second
         )
     }
 
-    private fun MavenProject.flattenParents(): MavenProject {
+    fun analyzeJava(dependency: String): CompletableFuture<DependencyAnalyzeResult> {
+        return GlobalScope.future { analyze(dependency) }
+    }
+
+    private suspend fun MavenProject.flattenParents(projectCache: MutableMap<String, Pair<String, MavenProject>>): MavenProject {
         return if (parent == null) {
             this
         } else {
             logger.trace { "Downloading the parent of $gradleId" }
             val (_, projectParent) = try {
-                downloadPom(parent.gradleId)
+                projectCache.getOrPut(parent.gradleId) {
+                    downloadPom(parent.gradleId)
+                }
             } catch (ex: Exception) {
                 logger.trace { "Failed to download the parent of $gradleId: ${ex.message}" }
                 throw DependencyDownloadException(parent.gradleId, ex)
             }
 
-            val flattenedParent = projectParent.flattenParents()
+            val flattenedParent = projectParent.flattenParents(projectCache)
             MavenProject(
                 groupId ?: flattenedParent.groupId,
                 artifactId,
@@ -160,7 +190,7 @@ class DepsClient @JvmOverloads constructor(
         }
     }
 
-    fun getDependencySize(dependencyUrl: String): Long? {
+    suspend fun getDependencySize(dependencyUrl: String): Long? {
         logger.trace { "Getting size of $dependencyUrl" }
 
         val request = Request.Builder()
@@ -168,7 +198,7 @@ class DepsClient @JvmOverloads constructor(
             .method("HEAD", null)
             .build()
 
-        httpClient.newCall(request).execute().use {
+        httpClient.newCall(request).async().use {
             val size = it.header("Content-Length")?.toLongOrNull()
             if (size != null) {
                 logger.trace { "Got size of $dependencyUrl: $size bytes" }
@@ -180,14 +210,14 @@ class DepsClient @JvmOverloads constructor(
         }
     }
 
-    fun downloadPom(dependency: String): Pair<String, MavenProject> {
+    private suspend fun downloadPom(dependency: String): Pair<String, MavenProject> {
         logger.debug { "Downloading $dependency POM" }
         for (url in repositories) {
             val dependencyUrl = buildDependencyUrl(url, dependency)
             logger.trace { "Getting $dependencyUrl" }
             val response = try {
                 val request = Request.Builder().url(dependencyUrl).build()
-                httpClient.newCall(request).execute()
+                httpClient.newCall(request).async()
             } catch (ex: IOException) {
                 logger.info(ex) { "Failed to fetch a pom from $dependencyUrl" }
                 continue
